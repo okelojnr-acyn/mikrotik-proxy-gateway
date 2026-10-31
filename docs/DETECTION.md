@@ -142,6 +142,50 @@ side (simplest, matches this setup's IPv4-only design), or extend the kill
 switch to cover IPv6 too (more work, only worth it if the proxy provider
 itself supports an IPv6 path, which most SOCKS5 proxy services don't).
 
+### 5. HTTP header leaks (X-Forwarded-For, Via, Proxy-Connection)
+
+Some proxy software — especially HTTP/HTTPS-forwarding proxies like Squid
+— adds or forwards headers that directly announce an intermediary is
+involved. If a destination server sees `X-Forwarded-For`, `Via`, or
+`Proxy-Connection`, that's direct proof of a proxy, independent of
+anything IP-related.
+
+**How to check**: fetch an endpoint that echoes back the exact headers it
+received, e.g. `https://httpbin.org/headers`, through the tunnel.
+
+**In this deployment**: verified clean — only `Accept`, `Host`, and
+`User-Agent` arrive at the destination, nothing proxy-revealing. This is
+architectural, not a configuration choice that could regress: this setup
+is a SOCKS5 tunnel at the TCP/IP layer, not an HTTP-forwarding proxy, so
+there's no HTTP proxy software in the path with headers to add or forward
+in the first place.
+
+### 6. TCP/IP (p0f) and TLS (JA3/JA4) fingerprinting
+
+**TLS (JA3/JA4)**: checked directly against `https://tls.peet.ws/api/all`
+in the actual Chrome browser going through the tunnel. The JA3/JA4 hash,
+cipher list, extension order, and GREASE/ECH/post-quantum key-share
+details all matched a completely genuine, current Chrome — because a
+SOCKS5 proxy relays raw TCP bytes without terminating or re-negotiating
+TLS itself, the ClientHello a destination server sees is byte-for-byte
+what the browser generated. There is no "proxy's TLS fingerprint" that
+could give this away, structurally, as long as the proxy stays SOCKS5
+(not an HTTPS-intercepting/MITM proxy, which would generate its own
+ClientHello and fail this check).
+
+**TCP/IP (p0f — TTL, window size, MSS, option order)**: same check showed
+the actual TCP SYN packet reaching the destination has a *source IP* of
+the proxy's exit IP, not the VM's or the host PC's — meaning the
+TCP/IP-level fingerprint a destination sees is the **proxy provider's own
+server's** network stack, not anything on this LAN. This is inherent to
+how SOCKS5 (or any real proxy) works — the proxy opens its own new TCP
+connection to the destination — and isn't something configurable from
+this side at all. It's worth knowing this is a Decodo-side characteristic
+if it ever becomes suspicious-looking (e.g. if an exit node's TCP
+fingerprint doesn't look like a normal consumer OS), since the fix there
+would be asking the provider or switching exit IPs again, not changing
+anything in this repo.
+
 ## What's not realistically fixable here
 
 Beyond the above, there are fingerprinting signals this kind of

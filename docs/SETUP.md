@@ -125,11 +125,15 @@ a disruptive power-cycle):
 
 Fill in `configs/vm-watchdog.ps1.template`'s placeholders (VM name, VM LAN
 IP, a local log/state path) and save the result somewhere outside version
-control (e.g. this deployment's `local/` folder), then schedule it to run
-every minute:
+control (e.g. this deployment's `local/` folder). Also fill in
+`configs/vm-watchdog-launcher.vbs.template` with the path to that saved
+copy, and schedule the **launcher**, not `powershell.exe` directly —
+calling `powershell.exe` straight from the scheduled task's action works,
+but flashes a visible console window on every run, every minute,
+indefinitely:
 
 ```
-schtasks /create /tn "ProxyGW-VM-Watchdog" /tr "powershell.exe -ExecutionPolicy Bypass -File \"<path-to-filled-in-copy>\"" /sc minute /mo 1 /rl limited /f
+schtasks /create /tn "ProxyGW-VM-Watchdog" /tr "wscript.exe \"<path-to-filled-in-launcher.vbs>\"" /sc minute /mo 1 /rl limited /f
 ```
 
 No `/rp` (password) is needed or stored — like `StartProxyGW`, this runs

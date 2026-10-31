@@ -1,0 +1,8 @@
+' Silent launcher for vm-watchdog.ps1 - runs powershell.exe fully hidden
+' (0 = SW_HIDE), so the scheduled task doesn't flash a console window
+' every minute. wscript.exe itself also runs with no window. Calling
+' powershell.exe directly from the scheduled task's action instead of
+' through this wrapper is the easy mistake to make here - it works, but
+' flashes a visible console window on every run.
+Set objShell = CreateObject("WScript.Shell")
+objShell.Run "powershell.exe -ExecutionPolicy Bypass -File ""<path-to-filled-in-vm-watchdog.ps1>""", 0, True
