@@ -19,7 +19,7 @@ replace — the `docs/` folder (which is generic/reproducible) and
    router) that changes state for reasons outside any doc — cables get
    unplugged, the PC loses power, the VM hits its known boot-hang issue.
    Check actual reachability before making or recommending changes:
-   - `ssh -i ~/.ssh/proxygw_key okelojnr@<vm-lan-ip>` — confirm `proxygw`
+   - `ssh -i ~/.ssh/proxygw_key <vm-user>@<vm-lan-ip>` — confirm `proxygw`
      and `proxygw-healthcheck.timer` are `active`, and `tun0` exists.
    - `plink -ssh -pw <pw> admin@<router-lan-ip> -hostkey <fingerprint>
      "<RouterOS command>"` — confirm the `via-proxy` route is active and
@@ -65,10 +65,13 @@ replace — the `docs/` folder (which is generic/reproducible) and
     interface log (`ether1 link down/up`) and the VM's `proxygw-healthcheck`
     journal for timestamps that line up before concluding which failure
     mode you're looking at.
-  - **Clocks differ**: the router's clock is set to local time
-    (`Africa/Nairobi`, UTC+3); the VM's clock is UTC. Convert before
-    correlating timestamps between the two, or you'll draw wrong
-    conclusions about what caused what.
+  - **Clocks can differ between devices** — e.g. a MikroTik is commonly
+    set to local time while a Linux VM defaults to UTC. Check
+    `/system clock print` on the router and `date` on the VM and convert
+    before correlating timestamps between the two, or you'll draw wrong
+    conclusions about what caused what (this exact mistake happened once
+    during this project's own troubleshooting — see `local/session-log.md`
+    if you have access to this specific deployment's private notes).
 
 ## After making changes
 

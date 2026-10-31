@@ -55,6 +55,20 @@ rather than a login prompt, power it off and start it again.
 
 ## Failure modes — what actually happens when something breaks
 
+```mermaid
+flowchart TD
+    Start["Something's wrong on the LAN"] --> Q{"Is the gateway VM\nreachable on the LAN?"}
+    Q -->|"no"| A["Kill switch engages\nRoute goes down, traffic DROPPED immediately"]
+    A --> A2["✅ Fails closed, cleanly.\nNo leak, nothing works either,\nuntil the VM/router is fixed."]
+    Q -->|"yes"| R{"Can the VM reach\nthe proxy provider?"}
+    R -->|"yes"| OK["Everything's fine"]
+    R -->|"no (ISP/WAN down,\nor provider hiccup)"| B["Route stays UP\n(check only pings the VM's LAN IP)"]
+    B --> B2["⚠️ Traffic STALLS/times out instead.\nNo leak, but doesn't feel like\nthe kill switch - easy to misdiagnose."]
+
+    style A2 fill:#163a2e,stroke:#4caf78,color:#9adbb9
+    style B2 fill:#4a3a1a,stroke:#e0b06c,color:#f0d9a8
+```
+
 The router's kill-switch route has a `check-gateway=ping` pointed at the
 **gateway VM's LAN IP** — a purely local check. It tells you whether the VM
 is reachable on the LAN. It tells you *nothing* about whether the VM can

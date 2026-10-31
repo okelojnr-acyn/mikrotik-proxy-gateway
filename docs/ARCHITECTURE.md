@@ -18,6 +18,38 @@ the router can treat as a normal next-hop gateway. The router then uses
 **policy-based routing** to send LAN traffic to that box instead of its own
 WAN interface. No VPN or container support is required anywhere.
 
+## A single request, end to end
+
+```mermaid
+sequenceDiagram
+    participant C as LAN device
+    participant R as MikroTik router
+    participant V as Gateway VM (tun2socks)
+    participant P as SOCKS5 proxy provider
+    participant S as Destination site
+
+    C->>R: HTTPS request (default gateway = router)
+    Note over R: policy routing rule matches LAN source →<br/>lookup-only in "via-proxy" table
+    R->>V: forwarded to VM's LAN IP (next-hop)
+    Note over V: NAT'd onto tun0
+    V->>P: relayed over SOCKS5
+    P->>S: proxy's own TCP+TLS connection
+    S-->>P: response
+    P-->>V: relayed back over SOCKS5
+    V-->>R: via tun0 → forwarded back
+    R-->>C: response delivered
+
+    Note over R,V: If V is unreachable, R's route lookup<br/>has no fallback table → request is dropped,<br/>not sent out R's own WAN (kill switch).
+```
+
+The destination site only ever sees the proxy provider's own TCP/TLS
+connection (step `P->>S`) — it never sees the VM, the router, or the LAN
+device directly. This is also why TCP/IP and TLS fingerprinting of the
+*destination-facing* connection reflect the **proxy provider's** server,
+not anything in this LAN — see
+[DETECTION.md](DETECTION.md) for what that does and doesn't protect
+against.
+
 ## Components
 
 ### 1. MikroTik router — policy routing, not a VPN endpoint
@@ -35,6 +67,21 @@ to use:
 A `/routing rule` with `action=lookup-only-in-table` is what makes this a
 kill switch: if `via-proxy`'s route is down (gateway unreachable), there is
 no `main`-table fallback for matched traffic — it's just dropped.
+
+```mermaid
+flowchart TD
+    A["Packet arrives,\nsource = LAN subnet"] --> B{"source = gateway\nVM's own IP?"}
+    B -->|yes| M["table: main\n(VM reaches the proxy directly)"]
+    B -->|no| C{"dst also in\nLAN subnet?"}
+    C -->|yes| M2["table: main\n(LAN devices reach each other normally)"]
+    C -->|no| D["lookup-only-in-table: via-proxy"]
+    D --> E{"gateway VM\nreachable?"}
+    E -->|yes| F["forward to VM → tun2socks → SOCKS5"]
+    E -->|no| G["❌ dropped — no main-table fallback\n(kill switch, fails closed)"]
+
+    style G fill:#4a1a1a,stroke:#e06c75,color:#e06c75
+    style F fill:#163a2e,stroke:#4caf78,color:#9adbb9
+```
 
 ### 2. Gateway VM — tun2socks
 

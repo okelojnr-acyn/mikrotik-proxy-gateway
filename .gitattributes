@@ -1,0 +1,17 @@
+# Normalize line endings regardless of a contributor's local git config.
+# This matters beyond style here: the .sh files are deployed to and run
+# on a Linux VM - a CRLF line ending breaks the shebang line outright and
+# causes "$'\r': command not found" on every other line.
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.rsc text eol=lf
+*.env.example text eol=lf
+
+# Windows-native scripts are fine either way, but keep them consistent too.
+*.ps1 text eol=crlf
+*.vbs text eol=crlf
+
+*.png binary
+*.jpg binary
+*.ico binary

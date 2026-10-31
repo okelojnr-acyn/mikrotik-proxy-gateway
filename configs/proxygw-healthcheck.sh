@@ -8,6 +8,7 @@
 # shouldn't be enough to trigger a restart on its own. Runs every 20s (see
 # proxygw-healthcheck.timer) specifically so a sub-minute WAN/proxy blip has
 # a real chance of being sampled instead of falling between 60s-spaced polls.
+set -euo pipefail
 
 STATE=/run/proxygw-healthcheck.failcount
 FAILS=$(cat "$STATE" 2>/dev/null || echo 0)
