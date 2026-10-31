@@ -1,0 +1,7 @@
+## Never commit real credentials, keys, or identifying network info.
+local/
+*.env
+*.pem
+*_key
+*_key.pub
+*.log

@@ -1,0 +1,16 @@
+[Unit]
+Description=tun2socks proxy gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/proxygw.env
+# --interface must match the VM's LAN-facing NIC (same as IF in proxygw-net.sh)
+# Tuning flags (auto-tuning + larger buffers) roughly doubled measured
+# throughput versus tun2socks defaults - see docs/OPERATIONS.md.
+ExecStart=/usr/local/bin/tun2socks -d tun://tun0 --interface enp0s3 -p ${PROXY} --tun-post-up /usr/local/bin/proxygw-net.sh --loglevel info --tcp-auto-tuning --tcp-rcvbuf 4MB --tcp-sndbuf 4MB --mtu 1420
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

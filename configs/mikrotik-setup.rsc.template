@@ -1,0 +1,55 @@
+# RouterOS policy-routing setup for the proxy gateway.
+# Replace the placeholders below, then paste into a terminal session
+# (SSH/Winbox/serial) - review each block before running on a live router.
+#
+#   <LAN_SUBNET>   e.g. 172.16.50.0/24
+#   <LAN_BRIDGE>   e.g. BR-LAN           - your LAN bridge/interface name
+#   <VM_IP>        e.g. 172.16.50.237    - gateway VM's LAN IP
+#   <VM_MAC>       e.g. 08:00:27:EA:3B:E6 - gateway VM's MAC address
+
+# 1. Reserve the VM's DHCP lease as static - it's about to become a routing
+#    gateway and cannot be allowed to change address.
+/ip dhcp-server lease make-static [find where mac-address="<VM_MAC>"]
+
+# 2. Routing table + default route to the VM, with a gateway health check.
+/routing table add name=via-proxy fib
+/ip route add dst-address=0.0.0.0/0 gateway=<VM_IP> routing-table=via-proxy check-gateway=ping comment=to-proxygw-vm
+
+# 3. Exemptions - order matters, these must be evaluated before the
+#    whole-LAN catch-all rule added in step 7.
+#    - the VM's own traffic must go out directly, not loop through itself
+/routing rule add src-address=<VM_IP>/32 action=lookup table=main comment=proxy-vm-exempt
+#    - LAN-to-LAN traffic (e.g. reaching the router itself) stays local
+/routing rule add src-address=<LAN_SUBNET> dst-address=<LAN_SUBNET> action=lookup table=main comment=lan-local-exempt
+
+# 4. Disable FastTrack - it bypasses routing-rule evaluation for established
+#    connections, which defeats policy routing and can leak traffic.
+#    Check your filter rule list first; this assumes the standard
+#    "FastTrack Acceleration" rule naming.
+/ip firewall filter disable [find action=fasttrack-connection]
+
+# 5. If your router force-redirects DNS (dst-nat of port 53) for this LAN
+#    interface, disable that redirect here so DNS traffic becomes normal
+#    forwarded traffic and gets policy-routed like everything else.
+#    Find the rule(s) first:
+#      /ip firewall nat print
+#    Then, for each matching rule number found for <LAN_BRIDGE>:
+#      /ip firewall nat disable <rule-number>
+
+# 6. TEST ON ONE DEVICE FIRST. Replace <TEST_DEVICE_IP> with a single
+#    device's IP, verify it works (see docs/SETUP.md step 8), THEN move to
+#    step 7 and remove this rule.
+/routing rule add src-address=<TEST_DEVICE_IP>/32 action=lookup-only-in-table table=via-proxy comment=TEST-device
+
+# 7. Once verified: remove the test rule and roll out to the whole LAN.
+# /routing rule remove [find comment=TEST-device]
+# /routing rule add src-address=<LAN_SUBNET> action=lookup-only-in-table table=via-proxy comment=ALL-LAN-via-proxy
+
+# After any rule change, flush connection tracking for the affected subnet
+# so FastTrack-cached (or just stale) connections don't mask the result:
+# /ip firewall connection remove [find src-address~"<LAN_SUBNET_PREFIX>"]
+
+# --- Emergency bypass: instantly restore normal internet for the whole LAN ---
+# /routing rule disable [find comment=ALL-LAN-via-proxy]
+# --- Re-enable later with ---
+# /routing rule enable [find comment=ALL-LAN-via-proxy]
