@@ -82,10 +82,11 @@ sudo systemctl status proxygw --no-pager
 Proxy tunnels occasionally hiccup for reasons outside this setup's control
 (a brief blip on the provider's end, a flaky UDP/QUIC-heavy site, etc.).
 Rather than rely on manually noticing and restarting the service, install a
-health check that runs every minute and restarts `proxygw` automatically if
-traffic genuinely isn't getting out — and logs the event, so a real
-recurring problem leaves evidence instead of just quietly fixing itself
-each time:
+health check that polls every 20s against two independent endpoints and
+restarts `proxygw` automatically — after two consecutive failed polls, not
+one — if traffic genuinely isn't getting out, logging the event (with
+`tun0` state and a tunnel ping) so a real recurring problem leaves evidence
+instead of just quietly fixing itself each time:
 
 ```
 sudo install -o root -g root -m 755 proxygw-healthcheck.sh /usr/local/bin/proxygw-healthcheck.sh
@@ -112,6 +113,30 @@ sudo systemctl stop proxygw
 curl --interface tun0 --max-time 5 https://ip.decodo.com/json   # should fail/time out, not leak
 sudo systemctl start proxygw
 ```
+
+### Host-side VM watchdog (recommended)
+
+`proxygw-healthcheck.*` runs *inside* the VM, so it can't help if the whole
+VM hangs or crashes (including the intermittent boot hang — see
+Troubleshooting). Close that gap with a watchdog on the Windows host that
+checks the VM's reachability and power-cycles it after a few consecutive
+failures (deliberately debounced — a single dropped ping shouldn't trigger
+a disruptive power-cycle):
+
+Fill in `configs/vm-watchdog.ps1.template`'s placeholders (VM name, VM LAN
+IP, a local log/state path) and save the result somewhere outside version
+control (e.g. this deployment's `local/` folder), then schedule it to run
+every minute:
+
+```
+schtasks /create /tn "ProxyGW-VM-Watchdog" /tr "powershell.exe -ExecutionPolicy Bypass -File \"<path-to-filled-in-copy>\"" /sc minute /mo 1 /rl limited /f
+```
+
+No `/rp` (password) is needed or stored — like `StartProxyGW`, this runs
+only while the account is logged in, which this setup already requires for
+the VM itself to be running. Check `Get-ScheduledTaskInfo -TaskName
+"ProxyGW-VM-Watchdog"` for `LastTaskResult` (`0` = success) and tail the
+watchdog's own log file for anything it's actually had to act on.
 
 ## 6. Auto-start the VM with the host
 

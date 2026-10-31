@@ -1,0 +1,72 @@
+# Host-side watchdog for the gateway VM. Fills the one real gap left by
+# proxygw-healthcheck.sh/.timer (which runs *inside* the VM and so can't
+# help if the whole VM is hung/crashed, not just the tun2socks process).
+#
+# Logic, deliberately mirroring the in-VM healthcheck's debounce pattern:
+#   - If the VM itself isn't even in "running" state, start it.
+#   - If it's "running" but not answering LAN pings, that's a soft fail -
+#     count it, don't act yet (avoids overreacting to one dropped ping).
+#   - Only after $FailThreshold CONSECUTIVE soft fails, power-cycle it.
+#   - After taking action, suppress further action for $GraceSeconds so
+#     the normal ~60s boot time (or the known intermittent boot hang - see
+#     docs/TROUBLESHOOTING.md) isn't mistaken for a second failure before
+#     the VM has had a fair chance to come up.
+#
+# Fill in the placeholders below and schedule this to run every minute,
+# e.g.:
+#   schtasks /create /tn "ProxyGW-VM-Watchdog" /tr "powershell.exe -ExecutionPolicy Bypass -File \"<path-to-filled-in-copy>\"" /sc minute /mo 1 /rl limited /f
+
+$VmName         = "<vm-name>"              # e.g. proxygw
+$VmLanIp        = "<vm-lan-ip>"            # e.g. 172.16.50.237
+$VBoxManage     = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+$StateFile      = "<path-to-local-dir>\vm-watchdog-state.json"
+$LogFile        = "<path-to-local-dir>\vm-watchdog.log"
+$FailThreshold  = 3      # consecutive failed checks before acting (~3 min at a 1-min schedule)
+$GraceSeconds   = 150    # don't re-act for this long after taking action
+
+function Write-Log($msg) {
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $msg" | Add-Content -Path $LogFile
+}
+
+$state = if (Test-Path $StateFile) { Get-Content $StateFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{ fails = 0; lastAction = [datetime]::MinValue } }
+
+# Still inside the post-action grace window - skip entirely, don't count anything.
+if (([datetime]$state.lastAction) -gt (Get-Date).AddSeconds(-$GraceSeconds)) {
+    exit 0
+}
+
+$vmState = (& $VBoxManage showvminfo $VmName --machinereadable | Select-String '^VMState=') -replace 'VMState="([^"]+)"', '$1'
+
+if ($vmState -ne "running") {
+    Write-Log "VM state is '$vmState', not running - starting it."
+    & $VBoxManage startvm $VmName --type headless
+    $state.fails = 0
+    $state.lastAction = Get-Date
+    $state | ConvertTo-Json | Set-Content $StateFile
+    exit 0
+}
+
+$pingOk = Test-Connection -ComputerName $VmLanIp -Count 2 -Quiet -ErrorAction SilentlyContinue
+
+if ($pingOk) {
+    if ($state.fails -gt 0) { Write-Log "VM reachable again after $($state.fails) soft fail(s)." }
+    $state.fails = 0
+    $state | ConvertTo-Json | Set-Content $StateFile
+    exit 0
+}
+
+$state.fails += 1
+
+if ($state.fails -lt $FailThreshold) {
+    Write-Log "VM running but unreachable on LAN - soft fail $($state.fails)/$FailThreshold, not acting yet."
+    $state | ConvertTo-Json | Set-Content $StateFile
+    exit 0
+}
+
+Write-Log "VM running but unreachable for $FailThreshold consecutive checks - power-cycling (a NIC link toggle alone is known not to reliably fix this - see docs/TROUBLESHOOTING.md)."
+& $VBoxManage controlvm $VmName poweroff
+Start-Sleep -Seconds 3
+& $VBoxManage startvm $VmName --type headless
+$state.fails = 0
+$state.lastAction = Get-Date
+$state | ConvertTo-Json | Set-Content $StateFile

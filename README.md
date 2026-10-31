@@ -60,8 +60,9 @@ two most common questions people ask about a setup like this:
 docs/
   ARCHITECTURE.md     full design + why native MikroTik proxying isn't possible
   SETUP.md            step-by-step build instructions (VM, service, router)
-  OPERATIONS.md        reboot behavior, disconnecting the PC, emergency bypass
+  OPERATIONS.md        reboot behavior, disconnecting the PC, emergency bypass, failure modes
   TROUBLESHOOTING.md   every real issue hit while building this, and the fix
+  DETECTION.md         why a service might flag "VPN/Proxy detected" and what's fixable
 configs/
   proxygw.service.template   systemd unit for the tun2socks gateway
   proxygw-net.sh              post-up network/killswitch script run by the service

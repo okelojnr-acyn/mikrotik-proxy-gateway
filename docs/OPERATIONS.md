@@ -53,6 +53,86 @@ internet. If they don't, log into Windows (if not already), open
 VirtualBox, and check the `proxygw` VM — if it's stuck at a boot log screen
 rather than a login prompt, power it off and start it again.
 
+## Failure modes — what actually happens when something breaks
+
+The router's kill-switch route has a `check-gateway=ping` pointed at the
+**gateway VM's LAN IP** — a purely local check. It tells you whether the VM
+is reachable on the LAN. It tells you *nothing* about whether the VM can
+actually reach the proxy provider over the internet. That one fact explains
+why different failures look and feel different, even though none of them
+leak:
+
+### The VM/router path itself fails (VM crashed, hung, or unreachable)
+
+The router's gateway check fails, the `via-proxy` route goes down, and
+because the LAN's routing rule has no fallback table, affected traffic is
+dropped outright. This is the kill switch working as designed: **fails
+closed, cleanly, immediately.** Nothing leaks to the real IP; nothing works
+either, until the VM is reachable again.
+
+- If it's just the `tun2socks` process that died (not the whole VM),
+  `systemd` (`Restart=always`, `RestartSec=3`) brings it back in a few
+  seconds on its own — the VM's own kill-switch rule (a `blackhole` route)
+  protects forwarded LAN traffic during that brief gap.
+- If the whole VM is hung or crashed (including the known intermittent
+  boot-hang — see Troubleshooting), the in-VM healthcheck can't help,
+  since its own watchdog dies with the VM. A **host-side watchdog**
+  (`configs/vm-watchdog.ps1.template`, scheduled every minute) closes this
+  gap: it checks the VM's state and LAN reachability from the Windows
+  host, and power-cycles it after a few consecutive failures (deliberately
+  debounced so one dropped ping doesn't trigger a disruptive power-cycle).
+  See Setup → "Host-side VM watchdog" for installing it.
+- A VM that's "running" per VirtualBox but unreachable from the LAN after a
+  host NIC link event (cable unplug/replug) is a distinct, previously-seen
+  issue — see Troubleshooting for the fix (full VM power-cycle, not just a
+  NIC link toggle).
+
+### A brief ISP/WAN glitch (seconds to a minute or two, not a real outage)
+
+This is the subtle one. The VM stays fully reachable *on the LAN* the whole
+time, so the router's gateway check never trips and the route **never goes
+down**. The router keeps forwarding LAN traffic to the VM exactly as
+before. But the VM's own path out to the proxy provider goes over that same
+dead WAN link, so the tunnel can't move data either.
+
+**Net effect: traffic stalls and times out, rather than being cleanly
+blocked.** No leak — but it doesn't look or feel like the kill switch
+engaging. From a LAN device's perspective this is indistinguishable from a
+proxy-provider-side hiccup (see below); the difference only shows up by
+checking the router's own WAN interface log for link flaps around the same
+time.
+
+A short flap (well under the healthcheck's poll interval) can also leave
+**no log trail at all** — the in-VM healthcheck samples periodically with a
+short timeout, so it's entirely possible for a sub-minute glitch to resolve
+itself in between two checks, or within one check's timeout window, without
+ever being recorded. Absence of a healthcheck log entry is not proof that
+nothing happened.
+
+### The proxy provider has a hiccup on their end
+
+Looks identical to an ISP/WAN glitch from the LAN's perspective — a stall,
+not a leak — since the VM's tunnel depends on reaching the provider over
+the internet either way. There's no automatic fallback to a different
+proxy/IP on the account; switching exit IPs is a manual edit (see "Changing
+the proxy provider or exit location" below).
+
+### The router itself fails or reboots
+
+Routing rules, the `via-proxy` route, and the firewall changes (FastTrack
+disabled, DNS redirect disabled) are all saved configuration, not
+runtime-only state — they survive a router reboot without needing to be
+reapplied manually. The LAN is down for the duration of the reboot itself,
+same as any router restart, proxy setup or not.
+
+### General diagnostic note
+
+When something broke and it's not obvious which of the above it was: check
+the router's WAN interface log for link-down/up events, and the VM's
+`proxygw-healthcheck` journal, for timestamps around the same window — but
+make sure both clocks are actually in the same timezone before comparing,
+or you'll draw the wrong conclusion about what caused what.
+
 ## Emergency bypass — restore normal internet instantly
 
 If the proxy chain is broken and you need internet back immediately, SSH or

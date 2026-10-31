@@ -210,13 +210,28 @@ time you can check, it's already recovered):
   window of degraded VM networking without a full outage.
 
 **Mitigation shipped in this repo:** `configs/proxygw-healthcheck.*`
-(script + oneshot service + 1-minute timer) actively tests connectivity
-through `tun0` and restarts `proxygw` automatically if it's actually down,
-logging the event via `logger`. This won't fix an upstream provider hiccup
-that resolves on its own faster than the check interval, but it bounds the
-worst case to about a minute of downtime and — more importantly — leaves a
-log trail (`journalctl -t proxygw-healthcheck`) so a *genuinely* recurring
-problem is diagnosable instead of anecdotal.
+(script + oneshot service + timer, polling every 20s) actively tests
+connectivity through `tun0` against two independent endpoints and restarts
+`proxygw` automatically if it's actually down, logging the event via
+`logger`. It requires **two consecutive failed polls** before restarting,
+not one — a single flaky CDN response isn't enough to trigger a restart on
+its own. This won't fix an upstream provider hiccup that resolves on its
+own faster than the check interval, but it bounds the worst case to well
+under a minute of downtime and — more importantly — leaves a log trail
+(`journalctl -t proxygw-healthcheck`) so a *genuinely* recurring problem is
+diagnosable instead of anecdotal. On an actual restart, the log line also
+includes `tun0` link state, the table-100 route, and a ping-through-tun0
+result at that moment, specifically to make a recurring-but-unexplained
+pattern easier to pin down next time instead of needing to re-derive it
+live.
+
+**Important caveat, found by direct observation**: even a 20s poll
+interval can miss a sub-minute WAN flap entirely if the flap starts and
+ends between two polls, or resolves within one poll's timeout window — a
+clean `journalctl -t proxygw-healthcheck` is evidence the *tunnel* wasn't
+down at the moments it happened to check, not proof nothing happened. See
+docs/OPERATIONS.md → "Failure modes" for how to tell this apart from an
+actual kill-switch event using the router's own WAN interface log instead.
 
 **If it keeps happening:** check `journalctl -t proxygw-healthcheck` for a
 pattern (time of day, frequency), and consider disabling QUIC in the
