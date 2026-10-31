@@ -74,7 +74,10 @@ suggested trick. Don't rely on it without testing on the actual target OS.
   machine showing the "wrong" local time while it's set.
 
 This is a setting change on the machine itself, not something to automate
-unattended — whichever option is chosen, apply it manually.
+unattended — whichever option is chosen, apply it manually. It's also
+**per-device**: the router/VM have no way to fix this LAN-wide, since the
+browser reads the OS clock of whichever device it's running on. Each
+device that needs to pass this check needs its own clock set to match.
 
 ### 3. WebRTC leaks
 
