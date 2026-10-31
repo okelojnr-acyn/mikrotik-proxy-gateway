@@ -39,14 +39,29 @@ replace — the `docs/` folder (which is generic/reproducible) and
   the VM itself is still "running." Reconnecting the cable alone doesn't
   always bring it back — see the next point.
 - **Known recurring issue**: after the host physical NIC loses and
-  regains link (cable unplug/replug, router power cycle, etc.),
-  VirtualBox's bridged networking can get stuck even once the link is
-  back — the VM pings fine from the host but is unreachable from the
-  router/LAN. A NIC link-state toggle (`setlinkstate1 off` then `on`)
-  does **not** reliably fix this. A full VM power-cycle
+  regains link (cable unplug/replug, router power cycle, etc.) — **or
+  after any `VBoxManage controlvm <vm> setlinkstate1 off`/`on` toggle,
+  even with no physical event at all** (confirmed: deliberately using
+  this to simulate a VM outage for testing reproduces the exact same
+  bug) — VirtualBox's bridged networking can get stuck even once the
+  link is back: the VM pings fine from the host but is unreachable from
+  the router/LAN. A NIC link-state toggle does **not** reliably fix this
+  (it's often what caused it in the first place). A full VM power-cycle
   (`poweroff` + `startvm`) does. This has recurred across multiple
-  sessions — always try the power-cycle directly rather than spending
-  time on the link toggle first.
+  sessions — always go straight to the power-cycle, and avoid using
+  `setlinkstate1` as a test/simulation tool on this setup since the test
+  itself causes the exact failure it's meant to probe.
+- **The boot hang (see Troubleshooting) got worse under heavy host
+  load**: 3 failed attempts in a row were observed once during a session
+  with unusually high host CPU contention (heavy browser/tool usage
+  running concurrently). Not proven causal, but if retries are failing
+  repeatedly, consider whether the host itself is under unusual load
+  before concluding it's just bad luck.
+- **A LAN device losing internet isn't always the WAN or the VM** — the
+  router's own LAN-side switch ports can flap independently (see
+  Troubleshooting → "A device loses internet, but it's not the WAN and
+  not the gateway VM"). Check the full interface log, not just the WAN
+  port, before assuming which failure mode you're looking at.
 - **After any VM/route disruption**, flush RouterOS connection tracking
   for the LAN subnet before considering the fix verified — FastTrack (if
   it were ever re-enabled) and stale conntrack entries can otherwise pin

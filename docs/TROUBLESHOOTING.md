@@ -37,6 +37,26 @@ line, CPU pegged on one core, no progress for many minutes.
    boot. Once a boot succeeds, the system is stable — this is strictly an
    early-boot issue, not an ongoing one.
 
+   **Observed once: 3 failed attempts in a row** (roughly a 1-in-8 chance
+   if attempts were truly independent at 50/50) during a session where the
+   host was simultaneously running a browser with dozens of tabs, several
+   SSH/RDP-style tool sessions, and other CPU-heavy background processes.
+   Not proven causal, but consistent with the "host CPU scheduling
+   starves the guest's virtual clock" theory — if you're about to do a
+   boot-hang-prone power-cycle, closing unnecessary host-side load first
+   is a reasonable thing to try before assuming you're just having bad
+   luck. The 4th attempt succeeded with no other change made.
+
+   **If the VM boots past this but then sits waiting on
+   `systemd-networkd-wait-online.service` indefinitely**: that's not a
+   new hang, it's the same dependency this whole project relies on,
+   working as designed — `proxygw.service` has
+   `After=network-online.target`, so if the VM's bridged NIC has no link
+   (e.g. the host's physical cable is out), the VM will boot fine but
+   just sit there waiting for a network that can't come up, for as long
+   as the link stays down. Reconnect the host's cable and it proceeds on
+   its own within a few seconds — no VM-side action needed.
+
 ---
 
 ### `tun2socks --tun-post-up` script fails: `Error: Device for nexthop is not up`
@@ -102,13 +122,21 @@ traffic from anywhere beyond the host (like the router) doesn't reach it.
 
 **What didn't fully/reliably fix it:** toggling the VM's virtual NIC link
 state alone (`VBoxManage controlvm <vm> setlinkstate1 off` then `on`).
+Confirmed again later: deliberately using this same command to *simulate*
+a VM outage (for testing the router's kill switch) reproduced the exact
+same stale-bridge symptom, even though nothing physical was touched at
+all. **The trigger is any link-state transition on the host's bridged
+NIC, not specifically a physical cable event** — keep that in mind before
+using a NIC link toggle for testing anything on this setup, since the
+"test" itself can leave you in the broken state it was meant to probe.
 
 **What fixed it:** a full VM power cycle (`poweroff` then `startvm`).
 
 **Prevention:** avoid repeatedly unplugging/replugging the host's physical
-Ethernet cable while the gateway VM is running. If you need an alternate
-path to manage the router while physically disconnected, see the next
-item.
+Ethernet cable while the gateway VM is running, and avoid using
+`setlinkstate1` as a test tool on this setup for the same reason. If you
+need an alternate path to manage the router while physically disconnected,
+see the next item.
 
 ---
 
@@ -239,7 +267,97 @@ browsers on affected devices as a test (Chrome: `chrome://flags` →
 "Experimental QUIC protocol" → Disabled) to see if that specifically
 correlates with the symptom.
 
+**Update after enriching the healthcheck's failure logging** (logging
+`tun0` link state, the table-100 route, and a ping-through-tun0 result at
+the moment of each restart — see `configs/proxygw-healthcheck.sh`): this
+revealed the restarts aren't all the same failure. Two distinct patterns
+showed up on the same deployment within a few hours of each other:
+
+1. **`tun0` genuinely gone** (`Device "tun0" does not exist`) — the
+   `tun2socks` process itself died. A restart is the correct, necessary
+   response here.
+2. **`tun0` up, the table-100 route present, and a ping through `tun0`
+   succeeding** — yet both HTTPS health-check endpoints still failed
+   twice in a row, triggering a restart anyway. This is the more
+   interesting case: something about opening a *new* SOCKS5-relayed TCP
+   connection was failing even though the tunnel's basic plumbing was
+   fine. **Caveat on trusting the ping check specifically**: `tun2socks`
+   may answer ICMP echo requests itself without actually relaying them
+   anywhere — a successful ping through `tun0` is not firm proof the
+   proxy path is actually reachable end-to-end, just that the local
+   tunnel interface is up. Don't over-read it as confirmation the restart
+   was unnecessary.
+
+Two restarts of pattern 2 happened about a minute apart (the first
+restart didn't fix whatever caused the second failure right after), and
+separately, pattern-1 and pattern-2 events were observed roughly
+60-65 minutes apart from each other on the same day — consistent with,
+but not confirmed as, the proxy provider's own session/connection cycling
+on an hourly-ish cadence. If this is your proxy provider too, and you see
+the same pattern, it's worth asking their support about session/connection
+lifetime on your plan before assuming it's something local.
+
 ---
+
+### A device loses internet, but it's not the WAN and not the gateway VM
+
+**Symptom:** one or more LAN devices lose internet (sometimes a
+non-PC/non-gateway device, like a phone through an AP, notices first);
+the router's WAN interface log is completely quiet for that window (ruling
+out an ISP/WAN glitch — see Operations → "Failure modes"), and the
+gateway VM is confirmed healthy throughout.
+
+**Cause found once:** the router's own **LAN-side switch ports**
+(`ether2`/`ether3` on this deployment, i.e. the ports forming `BR-LAN`)
+flapping — several link down/up cycles in under a minute, coinciding with
+a connected AP's DHCP lease getting renewed. This is a third category of
+failure distinct from both "WAN glitch" and "gateway VM down" — it's the
+router's *LAN* side having a hardware/cabling hiccup, independent of
+everything this project's kill switch or healthchecks are watching for.
+
+**How to tell it apart**: check the router's interface log
+(`/log print`) for `ether2`/`ether3` (or whichever ports form your LAN
+bridge) activity in the relevant window, not just `ether1` (WAN). None of
+this project's existing monitoring (the in-VM healthcheck, the host
+watchdog, the router's `check-gateway` ping) is positioned to catch this
+specifically, since all three only ever check the VM's own reachability,
+not the health of the LAN switch ports themselves.
+
+**Fix:** none identified beyond the general "check cabling/AP hardware"
+— this reads as a physical-layer issue (cable, port, or the AP itself),
+not a configuration problem.
+
+### Routine `apt upgrade` on the gateway VM disrupts the tunnel
+
+**Observed:** running a normal `apt upgrade` with a batch of pending
+package updates, the tunnel/LAN connectivity dropped for a few minutes
+shortly after the upgrade finished.
+
+**Likely cause:** Ubuntu's `needrestart` (invoked automatically by `apt
+upgrade` when it detects libraries used by running services have been
+updated) decided to restart `ssh.service`, `systemd-networkd.service`,
+and `systemd-resolved.service` together. `tun0` and its routing/iptables
+rules are set up by `tun2socks`'s `--tun-post-up` script, not by
+`systemd-networkd` directly, so this shouldn't tear `tun0` down — but
+restarting the base network stack services it depends on can still cause
+a real, if brief, disruption to the whole chain, especially if the host
+is already under heavy load (see the boot-hang entry above for why host
+load matters here too).
+
+**Not fully confirmed as the sole cause** — treat this as a caution, not
+a proven mechanism. **Mitigation:** after any `apt upgrade` on this VM,
+explicitly verify the tunnel afterward rather than assuming it's fine
+just because `apt` exited cleanly:
+
+```
+systemctl is-active proxygw
+curl --interface tun0 --max-time 8 https://ip.decodo.com/json
+```
+
+If it's broken, `sudo systemctl restart proxygw` re-runs the
+`--tun-post-up` script and should recover it without needing a full VM
+reboot. Consider doing routine upgrades at a time when a brief
+interruption is acceptable, not mid-use.
 
 ### Large file downloads getting killed partway through
 

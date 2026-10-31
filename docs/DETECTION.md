@@ -131,19 +131,22 @@ Linux), and try fetching an IPv6-only test endpoint, e.g.
 `https://api6.ipify.org?format=json` — if that succeeds, IPv6 is live and
 unprotected.
 
-**In this deployment, as of the date of this doc**: no global IPv6 was
-present on the LAN at all (the ISP connection doesn't appear to hand out
-IPv6), so this specific device wasn't leaking — but that's because IPv6
-isn't available right now, not because anything here actively blocks it.
-**Treat this as a latent risk, not a solved problem.** If the ISP ever
-enables IPv6 (a firmware update, a plan change, etc.), this setup would
-start leaking over IPv6 immediately with no warning, since nothing
-currently monitors for it.
+**Originally found in this deployment**: no global IPv6 was present on
+the LAN at all (the ISP connection doesn't appear to hand out IPv6), so
+there was no active leak — but that was because IPv6 wasn't available at
+the time, not because anything was actively blocking it. Treated as a
+latent risk rather than a solved problem, since an ISP firmware update or
+plan change could turn IPv6 on with no warning.
 
-**Fix, if/when IPv6 shows up**: disable IPv6 entirely on the router's LAN
-side (simplest, matches this setup's IPv4-only design), or extend the kill
-switch to cover IPv6 too (more work, only worth it if the proxy provider
-itself supports an IPv6 path, which most SOCKS5 proxy services don't).
+**Fix applied**: `/ipv6 settings set disable-ipv6=yes` on the router —
+the simplest option, matching this setup's IPv4-only design, and
+confirmed not to disrupt existing IPv4 LAN traffic or the tunnel when
+applied live. This disables the router's own IPv6 routing/forwarding
+entirely, so even if the ISP starts offering IPv6 upstream, there's no
+path through to the LAN. The alternative (extending the kill switch to
+cover IPv6 too) is more work and only worth it if the proxy provider
+itself supports an IPv6 path, which most SOCKS5 proxy services don't —
+not applicable here.
 
 ### 5. HTTP header leaks (X-Forwarded-For, Via, Proxy-Connection)
 

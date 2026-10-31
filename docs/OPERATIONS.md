@@ -84,6 +84,14 @@ dropped outright. This is the kill switch working as designed: **fails
 closed, cleanly, immediately.** Nothing leaks to the real IP; nothing works
 either, until the VM is reachable again.
 
+Measured directly (by deliberately making the VM unreachable and timing
+it): the route took about **10-15 seconds** to flip to inactive after the
+VM stopped responding, and recovered promptly once it was reachable
+again. Not instantaneous — RouterOS's `check-gateway=ping` has to miss
+enough pings to decide the gateway is actually down, not just a dropped
+packet — but fast enough that "the kill switch took effect" and "it's
+been down for ages" aren't the same conversation.
+
 - If it's just the `tun2socks` process that died (not the whole VM),
   `systemd` (`Restart=always`, `RestartSec=3`) brings it back in a few
   seconds on its own — the VM's own kill-switch rule (a `blackhole` route)
@@ -196,6 +204,51 @@ measured throughput in testing:
 Add these flags to the `ExecStart` line in `proxygw.service`. Beyond this,
 throughput is capped by the proxy provider's plan, not by anything tunable
 locally.
+
+## Change the router's default password
+
+If you haven't already, this is the first thing to do on any router
+you're configuring this way — it's a bigger exposure than anything else
+in this project, and this repo can't do it for you (it requires choosing
+a real secret). From a RouterOS CLI:
+
+```
+/user set admin password=<a-real-password>
+```
+
+Use a password manager to generate and store it — don't reuse one from
+anywhere else, and don't skip this because the router is "just on the
+LAN." Anything that can reach the router's management IP (including a
+compromised LAN device) can try it.
+
+## Backup and recovery
+
+Neither the router nor the VM currently auto-backs-up anywhere — if either's
+storage fails outright, you're rebuilding from this repo's docs plus
+whatever you backed up manually. Two separate things to keep:
+
+**Router config**: export it with `/export file=<name>`, then copy the
+resulting `<name>.rsc` off the router (`scp`/`pscp` over its SSH service).
+This captures the interface/routing/firewall config (including everything
+this project's `mikrotik-setup.rsc.template` sets up) — it does **not**
+include user passwords. Re-apply to a factory-reset or replacement router
+with `/import file=<name>.rsc`. Do this after any meaningful config
+change, not just once.
+
+**Gateway VM**: the fastest real backup is a VirtualBox export
+(`VBoxManage export <vm> -o <file>.ova`) or simply copying the VM's disk
+image while it's powered off. Given how small and quick this VM is to
+rebuild from scratch (SETUP.md's whole point), a full backup is optional —
+but at minimum, keep a copy of `/etc/proxygw.env` and
+`/etc/systemd/system/proxygw*.{service,timer}` somewhere, since those hold
+the one piece of state (proxy credentials) that isn't reconstructable from
+this repo alone.
+
+**Recovery priority if you're starting from nothing**: router config
+import first (gets the LAN back to normal direct internet even before the
+VM exists, since without the VM the kill switch just blocks — see
+"Emergency bypass" above to disable the routing rule entirely in the
+meantime), then rebuild/restore the VM, then re-enable the routing rule.
 
 ## Changing the proxy provider or exit location
 
