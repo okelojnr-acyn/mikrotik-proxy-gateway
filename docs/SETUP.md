@@ -77,6 +77,27 @@ sudo systemctl enable --now proxygw
 sudo systemctl status proxygw --no-pager
 ```
 
+### Watchdog (recommended)
+
+Proxy tunnels occasionally hiccup for reasons outside this setup's control
+(a brief blip on the provider's end, a flaky UDP/QUIC-heavy site, etc.).
+Rather than rely on manually noticing and restarting the service, install a
+health check that runs every minute and restarts `proxygw` automatically if
+traffic genuinely isn't getting out — and logs the event, so a real
+recurring problem leaves evidence instead of just quietly fixing itself
+each time:
+
+```
+sudo install -o root -g root -m 755 proxygw-healthcheck.sh /usr/local/bin/proxygw-healthcheck.sh
+sudo install -o root -g root -m 644 proxygw-healthcheck.service /etc/systemd/system/proxygw-healthcheck.service
+sudo install -o root -g root -m 644 proxygw-healthcheck.timer /etc/systemd/system/proxygw-healthcheck.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now proxygw-healthcheck.timer
+```
+
+Check whether it's ever actually fired: `journalctl -t proxygw-healthcheck`
+— no output means it's never needed to intervene.
+
 Verify traffic actually flows through `tun0` specifically (not just the
 VM's normal route):
 

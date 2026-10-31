@@ -1,0 +1,7 @@
+[Unit]
+Description=proxygw tunnel health check
+After=proxygw.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/proxygw-healthcheck.sh

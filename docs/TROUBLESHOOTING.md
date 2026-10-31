@@ -189,6 +189,43 @@ back on, not by `/run`.
 
 ---
 
+### Brief, self-resolving outages (a site stops loading for a minute, then works again)
+
+**Symptom:** a device on the LAN loses internet for roughly a minute and
+then it's back on its own, with nothing obviously wrong afterward — the
+`proxygw` service shows continuous uptime (no restart), the router's
+`via-proxy` route is active, and a manual test moments later succeeds
+cleanly.
+
+**Likely causes** (hard to pin down precisely after the fact, since by the
+time you can check, it's already recovered):
+- A brief hiccup on the proxy provider's end — outside this setup's
+  control.
+- UDP/QUIC handling through the SOCKS5 tunnel. Sites that lean heavily on
+  QUIC (YouTube, Google in general) can stall until the browser falls back
+  to plain TCP, which looks like a temporary outage from the user's side
+  even though the tunnel itself never went down. SOCKS5-over-TUN UDP
+  support is a known soft spot for this class of setup.
+- Host scheduling jitter (see the boot-hang entry above) causing a brief
+  window of degraded VM networking without a full outage.
+
+**Mitigation shipped in this repo:** `configs/proxygw-healthcheck.*`
+(script + oneshot service + 1-minute timer) actively tests connectivity
+through `tun0` and restarts `proxygw` automatically if it's actually down,
+logging the event via `logger`. This won't fix an upstream provider hiccup
+that resolves on its own faster than the check interval, but it bounds the
+worst case to about a minute of downtime and — more importantly — leaves a
+log trail (`journalctl -t proxygw-healthcheck`) so a *genuinely* recurring
+problem is diagnosable instead of anecdotal.
+
+**If it keeps happening:** check `journalctl -t proxygw-healthcheck` for a
+pattern (time of day, frequency), and consider disabling QUIC in the
+browsers on affected devices as a test (Chrome: `chrome://flags` →
+"Experimental QUIC protocol" → Disabled) to see if that specifically
+correlates with the symptom.
+
+---
+
 ### Large file downloads getting killed partway through
 
 Background/foreground command execution in most automation shells has a
