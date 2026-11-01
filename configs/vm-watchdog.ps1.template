@@ -6,7 +6,17 @@
 #   - If the VM itself isn't even in "running" state, start it.
 #   - If it's "running" but not answering LAN pings, that's a soft fail -
 #     count it, don't act yet (avoids overreacting to one dropped ping).
-#   - Only after $FailThreshold CONSECUTIVE soft fails, power-cycle it.
+#   - On the FIRST soft fail of an episode, try a light fix first: rebind
+#     the host's physical NIC ($HostNic) via Disable-NetAdapter/
+#     Enable-NetAdapter. This resets the NDIS filter stack (including
+#     VirtualBox's bridged-networking filter) without touching the VM at
+#     all - a few seconds, no VM reboot, no boot-hang risk. Addresses the
+#     stale-bridge-after-reconnect case specifically (see
+#     docs/TROUBLESHOOTING.md) without a full power cycle every time.
+#     Requires the scheduled task to run elevated (Disable-NetAdapter
+#     needs admin rights) - use /RL HIGHEST when creating the task.
+#   - Only after $FailThreshold CONSECUTIVE soft fails (light fix already
+#     tried and didn't hold), power-cycle the VM - the proven fallback.
 #   - After taking action, suppress further action for $GraceSeconds so
 #     the normal ~60s boot time (or the known intermittent boot hang - see
 #     docs/TROUBLESHOOTING.md) isn't mistaken for a second failure before
@@ -14,24 +24,52 @@
 #
 # Fill in the placeholders below and schedule this to run every minute,
 # e.g.:
-#   schtasks /create /tn "ProxyGW-VM-Watchdog" /tr "powershell.exe -ExecutionPolicy Bypass -File \"<path-to-filled-in-copy>\"" /sc minute /mo 1 /rl limited /f
+#   schtasks /create /tn "ProxyGW-VM-Watchdog" /tr "powershell.exe -ExecutionPolicy Bypass -File \"<path-to-filled-in-copy>\"" /sc minute /mo 1 /rl highest /f
 
 $VmName         = "<vm-name>"              # e.g. proxygw
 $VmLanIp        = "<vm-lan-ip>"            # e.g. 172.16.50.237
+$HostNic        = "<host-nic-name>"       # host's physical NIC bridged to the VM, e.g. Ethernet
 $VBoxManage     = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
 $StateFile      = "<path-to-local-dir>\vm-watchdog-state.json"
 $LogFile        = "<path-to-local-dir>\vm-watchdog.log"
-$FailThreshold  = 3      # consecutive failed checks before acting (~3 min at a 1-min schedule)
+$FailThreshold  = 3      # consecutive failed checks before the heavy fallback (~3 min at a 1-min schedule)
 $GraceSeconds   = 150    # don't re-act for this long after taking action
 
 function Write-Log($msg) {
     "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $msg" | Add-Content -Path $LogFile
 }
 
-$state = if (Test-Path $StateFile) { Get-Content $StateFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{ fails = 0; lastAction = [datetime]::MinValue } }
+$state = if (Test-Path $StateFile) { Get-Content $StateFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{ fails = 0; lastAction = [datetime]::MinValue.ToString("o"); lightFixTried = $false } }
+if (-not (Get-Member -InputObject $state -Name "lightFixTried" -MemberType NoteProperty)) {
+    $state | Add-Member -NotePropertyName lightFixTried -NotePropertyValue $false
+}
+
+# lastAction is stored as an ISO-8601 string ("o" format), not a bare [datetime] -
+# ConvertTo-Json expands a real [datetime] into a nested {value,DisplayHint,DateTime}
+# object, which silently breaks this comparison on the next run. Tolerate old-format
+# state files (nested object) by falling back to MinValue, same as a missing value.
+try { $lastAction = [datetime]::Parse($state.lastAction) } catch { $lastAction = [datetime]::MinValue }
 
 # Still inside the post-action grace window - skip entirely, don't count anything.
-if (([datetime]$state.lastAction) -gt (Get-Date).AddSeconds(-$GraceSeconds)) {
+if ($lastAction -gt (Get-Date).AddSeconds(-$GraceSeconds)) {
+    exit 0
+}
+
+# If the host's own physical NIC has no link at all (cable/router unplugged),
+# nothing below can possibly help - there is no physical path to the VM
+# regardless of its state. Found 2026-11-01: without this check, the
+# watchdog was power-cycling the VM every ~2 min for 45+ minutes straight
+# while the router was simply disconnected, which can never succeed and
+# just burns boot-hang-risk attempts for no reason. Skip all action and
+# reset the fail counter so recovery starts counting fresh once link is back.
+$nic = Get-NetAdapter -Name $HostNic -ErrorAction SilentlyContinue
+if (-not $nic -or $nic.Status -ne 'Up') {
+    if ($state.fails -gt 0 -or $state.lightFixTried) {
+        Write-Log "Host NIC '$HostNic' has no link (router/cable likely disconnected) - nothing to fix at this layer, skipping all VM action."
+    }
+    $state.fails = 0
+    $state.lightFixTried = $false
+    $state | ConvertTo-Json | Set-Content $StateFile
     exit 0
 }
 
@@ -41,7 +79,7 @@ if ($vmState -ne "running") {
     Write-Log "VM state is '$vmState', not running - starting it."
     & $VBoxManage startvm $VmName --type headless
     $state.fails = 0
-    $state.lastAction = Get-Date
+    $state.lastAction = (Get-Date).ToString("o")
     $state | ConvertTo-Json | Set-Content $StateFile
     exit 0
 }
@@ -51,11 +89,34 @@ $pingOk = Test-Connection -ComputerName $VmLanIp -Count 2 -Quiet -ErrorAction Si
 if ($pingOk) {
     if ($state.fails -gt 0) { Write-Log "VM reachable again after $($state.fails) soft fail(s)." }
     $state.fails = 0
+    $state.lightFixTried = $false
     $state | ConvertTo-Json | Set-Content $StateFile
     exit 0
 }
 
 $state.fails += 1
+
+if (-not $state.lightFixTried) {
+    Write-Log "VM running but unreachable on LAN - trying light fix first: rebinding host NIC '$HostNic' (no VM reboot)."
+    $state.lightFixTried = $true
+    try {
+        Disable-NetAdapter -Name $HostNic -Confirm:$false -ErrorAction Stop
+        Start-Sleep -Seconds 2
+        Enable-NetAdapter -Name $HostNic -Confirm:$false -ErrorAction Stop
+        Start-Sleep -Seconds 8
+        if (Test-Connection -ComputerName $VmLanIp -Count 2 -Quiet -ErrorAction SilentlyContinue) {
+            Write-Log "Light fix worked - VM reachable again, no VM reboot needed."
+            $state.fails = 0
+            $state | ConvertTo-Json | Set-Content $StateFile
+            exit 0
+        }
+        Write-Log "Light fix did not restore reachability - will fall back to full power-cycle if failures continue."
+    } catch {
+        Write-Log "Light fix failed to run (likely needs elevation): $($_.Exception.Message)"
+    }
+    $state | ConvertTo-Json | Set-Content $StateFile
+    exit 0
+}
 
 if ($state.fails -lt $FailThreshold) {
     Write-Log "VM running but unreachable on LAN - soft fail $($state.fails)/$FailThreshold, not acting yet."
@@ -63,10 +124,11 @@ if ($state.fails -lt $FailThreshold) {
     exit 0
 }
 
-Write-Log "VM running but unreachable for $FailThreshold consecutive checks - power-cycling (a NIC link toggle alone is known not to reliably fix this - see docs/TROUBLESHOOTING.md)."
+Write-Log "VM running but unreachable for $FailThreshold consecutive checks (light fix already tried) - power-cycling."
 & $VBoxManage controlvm $VmName poweroff
 Start-Sleep -Seconds 3
 & $VBoxManage startvm $VmName --type headless
 $state.fails = 0
-$state.lastAction = Get-Date
+$state.lightFixTried = $false
+$state.lastAction = (Get-Date).ToString("o")
 $state | ConvertTo-Json | Set-Content $StateFile

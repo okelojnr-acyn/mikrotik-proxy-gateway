@@ -138,6 +138,77 @@ Ethernet cable while the gateway VM is running, and avoid using
 need an alternate path to manage the router while physically disconnected,
 see the next item.
 
+**Lighter alternative, added to `vm-watchdog.ps1` (not yet confirmed to
+work reliably)**: toggling the VM's own virtual NIC (`setlinkstate1`) is
+confirmed *not* to fix this, but that's a different layer from toggling
+the *host's* physical NIC driver binding (`Disable-NetAdapter` /
+`Enable-NetAdapter` in Windows, not a cable event or a VM-side command).
+That fully unbinds and rebinds the NDIS stack on the host side, including
+VirtualBox's bridged-networking filter driver, without touching the VM at
+all. The watchdog now tries this first, before falling back to the proven
+full power-cycle. Requires admin rights (`/RL HIGHEST` on the scheduled
+task) — see `local/REAL-VALUES.md` for the exact setup command.
+
+**Two real bugs found and fixed 2026-11-01**, after the watchdog was
+observed power-cycling the VM every ~2 minutes for 45+ minutes straight
+with zero recovery — this was not a one-off, it had happened across
+multiple earlier sessions too and is the most likely explanation for the
+"we fix it, then a few minutes later it's broken again" loop:
+
+1. **The watchdog never checked whether the host's own physical NIC had
+   link at all** before trying the light fix or power-cycling. If the
+   router/cable is simply unplugged, the host NIC itself is down and
+   *nothing* below that layer — not the light fix, not a VM reboot — can
+   possibly restore reachability. The watchdog kept trying anyway,
+   burning a boot-hang-risk power-cycle every ~2-3 minutes for no
+   possible benefit. Fixed: it now checks `Get-NetAdapter` on the host
+   NIC first and no-ops (just resets its counters) if it's not `Up`.
+2. **The datetime-serialization bug from the 2026-10-31 fix (see item 29
+   in `local/session-log.md`) was only actually fixed in the "VM not
+   running" code path — the power-cycle fallback path at the bottom of
+   the script still did `$state.lastAction = Get-Date` (a raw
+   `[datetime]`, not `.ToString("o")`).** `ConvertTo-Json` silently
+   corrupts that into a nested object on write, so on the *next* run
+   `[datetime]::Parse()` throws, falls back to `[datetime]::MinValue`,
+   and the 150s post-action grace window silently never applied after a
+   power-cycle specifically. Net effect: after power-cycling the VM, the
+   watchdog would check again in ~1 minute — before the VM had any real
+   chance to finish booting — see it still unreachable, and immediately
+   start counting toward (and often reach) another power-cycle. This can
+   produce exactly the "looks fixed, dead again a few minutes later"
+   pattern independent of any actual VM/router issue. Fixed: that line
+   now also uses `.ToString("o")`, matching the other path.
+
+Both fixes are in `local/vm-watchdog.ps1` (deployed) and mirrored in
+`configs/vm-watchdog.ps1.template` (generic).
+
+**Verified live 2026-11-01, with a third bug found along the way**: on
+reconnecting the MikroTik, the watchdog correctly no-opped while the host
+NIC was still down, then correctly ran light-fix → soft-fail → power-cycle
+once link came back — but the *scheduled task itself* turned out to have
+been silently failing on every single run since 05:51 that same day
+(`LastTaskResult` stuck on the Win32 "process terminated unexpectedly"
+code, `NumberOfMissedRuns` climbing). Root cause: the task's logon type
+had ended up as `S4U`, which cannot satisfy `RunLevel: Highest` without a
+stored password — a well-known broken combination in Windows Task
+Scheduler, distinct from the `RunLevel` itself (which was already
+correctly set to `Highest`; that part had never been the problem). Fixed
+by switching the principal's logon type to `Interactive` (works silently
+for an admin user who's always logged in, no password needed — same
+no-stored-credential approach as elsewhere in this project):
+```powershell
+$principal = New-ScheduledTaskPrincipal -UserId "<host>\<user>" -LogonType Interactive -RunLevel Highest
+Set-ScheduledTask -TaskName "ProxyGW-VM-Watchdog" -Principal $principal
+```
+Needs to run from an **elevated** prompt (changing a task principal is a
+protected operation). After this, `LastTaskResult` went to `0` and the
+watchdog's own automated recovery sequence (light-fix → power-cycle) ran
+and completed successfully, unattended, exactly as designed — the VM came
+back up and `proxygw`/`tun0`/the router's `via-proxy` route were all
+confirmed healthy afterward. The VM boot-hang bug (separate, pre-existing)
+still showed up during this same test and needed one manual retry — that
+part is unrelated and unfixed, same as always.
+
 ---
 
 ### Need to reach the router but the host's LAN cable is unplugged
